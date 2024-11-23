@@ -8,6 +8,8 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import torchvision.utils as vutils
 import cv2
+import torchio as tio
+from PIL import Image, ImageEnhance
 
 
 # Custom noise addition transformations
@@ -34,6 +36,31 @@ class AddSaltPepperNoise:
         noisy_img[pepper_coords[0], pepper_coords[1]] = 0
 
         return noisy_img
+
+class ElasticDeformation: #TODO: This is not currently used, look into if this actually offers improvement
+    def __init__(self, num_control_points=4, max_displacement=5):
+        self.transform = tio.ElasticDeformation(
+            num_control_points=num_control_points, max_displacement=max_displacement
+        )
+
+    def __call__(self, img):
+        return self.transform(img)
+    
+class RandomSharpness: #TODO: Not currently used, this might help with picking up on patterns, look into using it
+    def __init__(self, factor_range=(0.5, 2.0)):
+        self.factor_range = factor_range
+
+    def __call__(self, img):
+        factor = np.random.uniform(*self.factor_range)
+        enhancer = ImageEnhance.Sharpness(img)
+        return enhancer.enhance(factor)
+    
+class RandomErasing: #TODO: Not currently used, I think this might help with having AI pick up on broader patterns/trends if that becomes an issue later
+    def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)):
+        self.transform = transforms.RandomErasing(p=p, scale=scale, ratio=ratio)
+
+    def __call__(self, img):
+        return self.transform(img)
 
 
 class AddGaussianNoise:
@@ -149,6 +176,27 @@ def main():
     ]
 
     # Define multiple transformation pipelines
+    transform_0 = transforms.Compose([ #TODO: Not used yet
+        transforms.Resize((224, 224)),
+        ElasticDeformation(num_control_points=5, max_displacement=5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    transform_sharpness = transforms.Compose([ #TODO: Not used yet
+        transforms.Resize((224, 224)),
+        RandomSharpness(factor_range=(0.5, 2.0)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    transform_random_erase = transforms.Compose([ #TODO: Not used yet
+        transforms.Resize((224, 224)),
+        RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
     transform_1 = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(),
