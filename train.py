@@ -1,5 +1,6 @@
+import cv2  
 import torch
-import cv2
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, device, epochs=10):
     """
@@ -17,6 +18,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
     Returns:
         None
     """
+    # Learning rate scheduler
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+
     for epoch in range(epochs):
         # Training phase
         model.train()
@@ -60,4 +64,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
 
         val_loss /= len(val_loader.dataset)
 
+        # Adjust learning rate
+        scheduler.step(val_loss)
+
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
