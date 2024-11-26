@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision.models import resnet50, ResNet50_Weights
+import os
 
 class SupCEResNet_Fusion(nn.Module):
     """Encoder + multimodal fusion classifier."""
@@ -20,8 +21,6 @@ class SupCEResNet_Fusion(nn.Module):
             )
             dim_in = self.encoder.fc.in_features
             self.encoder.fc = nn.Identity()  # Remove the original fully connected layer
-            # Your final layer should have num_classes outputs
-            num_classes = max_label + 1  # +1 because indices are 0-based
 
         # Add a fully connected layer for multimodal fusion
         self.fc = nn.Linear(dim_in + num_features, num_classes)
@@ -37,6 +36,8 @@ class SupCEResNet_Fusion(nn.Module):
         """
         encoded = self.encoder(x)  # Extract image features
         if label_vector is not None:
+            # Ensure label_vector is on the same device and has correct dtype
+            label_vector = label_vector.to(encoded.device).float()
             # Normalize and concatenate label vector
             label_vector = (label_vector - label_vector.min()) / (label_vector.max() - label_vector.min() + 1e-8)
             fused = torch.cat((encoded, label_vector), dim=1)
