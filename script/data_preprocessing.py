@@ -11,6 +11,22 @@ import cv2
 import torchio as tio
 from PIL import Image, ImageEnhance
 
+# Constants for default configuration
+DATA_PATH = '/storage/ice1/shared/d-pace_community/makerspace-datasets/MEDICAL/OLIVES/OLIVES/'
+LABEL_DATA_PATH = os.path.join(DATA_PATH, 'Biomarker_Clinical_Data_Images_Updated.csv')
+BIOMARKER_COLUMNS = [
+    'Atrophy / thinning of retinal layers', 'Disruption of EZ', 'DRIL', 'IR hemorrhages',
+    'IR HRF', 'Partially attached vitreous face', 'Fully attached vitreous face',
+    'Preretinal tissue/hemorrhage', 'DRT/ME', 'Fluid (IRF)', 'Fluid (SRF)',
+    'Disruption of RPE', 'PED (serous)', 'SHRM'
+]
+
+def preprocess_biomarkers(data_frame, biomarker_cols):
+    for col in biomarker_cols:
+        if col in data_frame:
+            data_frame[col] = data_frame[col].fillna(data_frame[col].mean())  # Impute missing values
+            data_frame[col] = (data_frame[col] - data_frame[col].mean()) / data_frame[col].std()  # Normalize
+    return data_frame
 
 # Custom noise addition transformations
 class AddSaltPepperNoise:
@@ -36,31 +52,6 @@ class AddSaltPepperNoise:
         noisy_img[pepper_coords[0], pepper_coords[1]] = 0
 
         return noisy_img
-
-class ElasticDeformation: #TODO: This is not currently used, look into if this actually offers improvement
-    def __init__(self, num_control_points=4, max_displacement=5):
-        self.transform = tio.ElasticDeformation(
-            num_control_points=num_control_points, max_displacement=max_displacement
-        )
-
-    def __call__(self, img):
-        return self.transform(img)
-    
-class RandomSharpness: #TODO: Not currently used, this might help with picking up on patterns, look into using it
-    def __init__(self, factor_range=(0.5, 2.0)):
-        self.factor_range = factor_range
-
-    def __call__(self, img):
-        factor = np.random.uniform(*self.factor_range)
-        enhancer = ImageEnhance.Sharpness(img)
-        return enhancer.enhance(factor)
-    
-class RandomErasing: #TODO: Not currently used, I think this might help with having AI pick up on broader patterns/trends if that becomes an issue later
-    def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)):
-        self.transform = transforms.RandomErasing(p=p, scale=scale, ratio=ratio)
-
-    def __call__(self, img):
-        return self.transform(img)
 
 
 class AddGaussianNoise:
@@ -96,6 +87,30 @@ class AddRandomRotation:
         angle = np.random.uniform(-self.max_angle, self.max_angle)
         return img.rotate(angle)
 
+class ElasticDeformation: #TODO: This is not currently used, look into if this actually offers improvement
+    def __init__(self, num_control_points=4, max_displacement=5):
+        self.transform = tio.ElasticDeformation(
+            num_control_points=num_control_points, max_displacement=max_displacement
+        )
+
+    def __call__(self, img):
+        return self.transform(img)
+    
+class RandomSharpness: #TODO: Not currently used, this might help with picking up on patterns, look into using it
+    def __init__(self, factor_range=(0.5, 2.0)):
+        self.factor_range = factor_range
+
+    def __call__(self, img):
+        factor = np.random.uniform(*self.factor_range)
+        enhancer = ImageEnhance.Sharpness(img)
+        return enhancer.enhance(factor)
+    
+class RandomErasing: #TODO: Not currently used, I think this might help with having AI pick up on broader patterns/trends if that becomes an issue later
+    def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)):
+        self.transform = transforms.RandomErasing(p=p, scale=scale, ratio=ratio)
+
+    def __call__(self, img):
+        return self.transform(img)
 
 # Preprocessing for clinical and biomarker data
 def preprocess_biomarkers(data_frame, biomarker_cols):
@@ -106,74 +121,52 @@ def preprocess_biomarkers(data_frame, biomarker_cols):
     return data_frame
 
 
-# Dataset class supporting multiple transformations per image
 class MultiTransformOLIVESDataset(Dataset):
-    def __init__(self, csv_path, image_root, biomarker_cols, transforms_list, num_transforms=5):
+    def __init__(self, csv_path, image_root, biomarker_cols, transforms_list, num_transforms=1, image_mode="RGB"):
         self.data = pd.read_csv(csv_path)
         self.image_root = image_root
         self.biomarker_cols = biomarker_cols
         self.transforms_list = transforms_list
         self.num_transforms = num_transforms
-
-        # Preprocess biomarkers
+        self.image_mode = image_mode  # "RGB" for 3 channels, "L" for grayscale
         self.data = preprocess_biomarkers(self.data, biomarker_cols)
 
     def __len__(self):
         return len(self.data) * self.num_transforms
 
     def __getitem__(self, idx):
-        # Map to original data index
         data_idx = idx // self.num_transforms
         transform_idx = idx % self.num_transforms
 
-        # Get image path
-        image_path = self.image_root + self.data.iloc[data_idx]['Path (Trial/Arm/Folder/Visit/Eye/Image Name)'].strip()
-        
-
+        image_path = os.path.join(self.image_root, self.data.iloc[data_idx]['Path (Trial/Arm/Folder/Visit/Eye/Image Name)'].strip())
         if not os.path.exists(image_path):
-            print(f"Image not found: {image_path}")
-            return None, None, None
+            raise FileNotFoundError(f"Image not found: {image_path}")
 
-        # Load and preprocess image
-        image = Image.open(image_path).convert("RGB")
+        image = Image.open(image_path).convert(self.image_mode)
         transform = self.transforms_list[transform_idx]
         if transform:
             image = transform(image)
 
-        # Extract clinical labels and biomarkers
         biomarker_data = self.data.iloc[data_idx][self.biomarker_cols].values.astype(np.float32)
-        label = self.data.iloc[data_idx]['BCVA']  # Example: BCVA as the main label
-
-        # Convert to tensors
+        label = self.data.iloc[data_idx]['BCVA']
         biomarker_tensor = torch.tensor(biomarker_data, dtype=torch.float32)
         label_tensor = torch.tensor(label, dtype=torch.float32)
+
         return image, biomarker_tensor, label_tensor
 
 
-# Visualization
-def visualize_batch(dataloader):
-    images, biomarkers, labels = next(iter(dataloader))
-    grid = vutils.make_grid(images, normalize=True)
-    plt.figure(figsize=(12, 12))
-    plt.imshow(grid.permute(1, 2, 0))
-    plt.title(f"Sample Batch - Labels: {labels.tolist()}")
-    plt.axis("off")
-    plt.show()
+def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
+    """
+    Returns train and validation DataLoaders with default settings.
 
+    Args:
+        batch_size (int): Batch size for the DataLoaders. Default is 16.
+        num_workers (int): Number of workers for data loading. Default is 1.
+        pin_memory (bool): Whether to use pinned memory. Default is True.
 
-def main():
-    # Paths
-    DATA_PATH = '/storage/ice1/shared/d-pace_community/makerspace-datasets/MEDICAL/OLIVES/OLIVES'
-    CURRENT_DIR = os.getcwd()
-    LABEL_DATA_PATH = os.path.join(CURRENT_DIR, '..', 'OLIVES_Dataset_Labels', 'full_labels', 'Biomarker_Clinical_Data_Images.csv')
-
-    # Define biomarker columns
-    biomarker_columns = [
-        'Atrophy / thinning of retinal layers', 'Disruption of EZ', 'DRIL', 'IR hemorrhages',
-        'IR HRF', 'Partially attached vitreous face', 'Fully attached vitreous face',
-        'Preretinal tissue/hemorrhage', 'DRT/ME', 'Fluid (IRF)', 'Fluid (SRF)',
-        'Disruption of RPE', 'PED (serous)', 'SHRM'
-    ]
+    Returns:
+        tuple: (train_loader, val_loader)
+    """
 
     # Define multiple transformation pipelines
     transform_0 = transforms.Compose([ #TODO: Not used yet
@@ -233,17 +226,19 @@ def main():
     ])
 
     transforms_list = [transform_1, transform_2, transform_3, transform_4, transform_5]
-
-    # Dataset and DataLoader
     dataset = MultiTransformOLIVESDataset(
         csv_path=LABEL_DATA_PATH,
         image_root=DATA_PATH,
-        biomarker_cols=biomarker_columns,
+        biomarker_cols=BIOMARKER_COLUMNS,
         transforms_list=transforms_list,
         num_transforms=len(transforms_list)
     )
-    dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=2, pin_memory=True)
 
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-if __name__ == "__main__":
-    main()
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+
+    return train_loader, val_loader
