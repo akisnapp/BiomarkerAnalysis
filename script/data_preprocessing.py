@@ -1,15 +1,12 @@
 import os
 import pandas as pd
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
+import torch.nn.functional as F
 import torch
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
-import matplotlib.pyplot as plt
-import torchvision.utils as vutils
 import cv2
-import torchio as tio
-from PIL import Image, ImageEnhance
 
 # Constants for default configuration
 DATA_PATH = '/storage/ice1/shared/d-pace_community/makerspace-datasets/MEDICAL/OLIVES/OLIVES/'
@@ -34,25 +31,21 @@ class AddSaltPepperNoise:
         self.amount = amount
 
     def __call__(self, img):
-        return Image.fromarray(self._add_salt_pepper(np.array(img), self.amount).astype(np.uint8))
-
-    @staticmethod
-    def _add_salt_pepper(image, amount):
+        img_np = np.array(img)
         s_vs_p = 0.5
-        noisy_img = np.copy(image)
+        noisy_img = np.copy(img_np)
 
         # Add salt
-        num_salt = int(np.ceil(amount * image.size * s_vs_p))
-        salt_coords = [np.random.randint(0, dim - 1, num_salt) for dim in image.shape[:2]]
-        noisy_img[salt_coords[0], salt_coords[1]] = 255
+        num_salt = int(np.ceil(self.amount * img_np.size * s_vs_p))
+        coords = [np.random.randint(0, i - 1, num_salt) for i in img_np.shape[:2]]
+        noisy_img[coords[0], coords[1]] = 255
 
         # Add pepper
-        num_pepper = int(np.ceil(amount * image.size * (1. - s_vs_p)))
-        pepper_coords = [np.random.randint(0, dim - 1, num_pepper) for dim in image.shape[:2]]
-        noisy_img[pepper_coords[0], pepper_coords[1]] = 0
+        num_pepper = int(np.ceil(self.amount * img_np.size * (1. - s_vs_p)))
+        coords = [np.random.randint(0, i - 1, num_pepper) for i in img_np.shape[:2]]
+        noisy_img[coords[0], coords[1]] = 0
 
-        return noisy_img
-
+        return Image.fromarray(noisy_img.astype(np.uint8))
 
 class AddGaussianNoise:
     def __init__(self, mean=0, variance=0.01):
@@ -60,24 +53,23 @@ class AddGaussianNoise:
         self.variance = variance
 
     def __call__(self, img):
-        return Image.fromarray((self._add_gaussian_noise(np.array(img), self.mean, self.variance) * 255).astype(np.uint8))
-
-    @staticmethod
-    def _add_gaussian_noise(image, mean=0, variance=0.01):
-        noise = np.random.normal(mean, np.sqrt(variance), image.shape)
-        noisy_img = image + noise
-        return np.clip(noisy_img, 0, 1)
-
+        img_np = np.array(img).astype(np.float32) / 255.0
+        noise = np.random.normal(self.mean, np.sqrt(self.variance), img_np.shape)
+        noisy_img = img_np + noise
+        noisy_img = np.clip(noisy_img, 0, 1) * 255
+        return Image.fromarray(noisy_img.astype(np.uint8).astype(np.uint8))
 
 # Define more transformations
 class AddRandomBrightnessContrast:
     def __call__(self, img):
-        img = np.array(img).astype(np.float32) / 255.0
-        alpha = 1.0 + (np.random.rand() - 0.5) * 0.4  # Brightness range: 0.8 to 1.2
-        beta = (np.random.rand() - 0.5) * 0.2  # Contrast range: -0.1 to 0.1
-        img = cv2.convertScaleAbs(img, alpha=alpha, beta=beta * 255)
-        return Image.fromarray(img)
-
+        img = img.convert("RGB")
+        enhancer_brightness = ImageEnhance.Brightness(img)
+        enhancer_contrast = ImageEnhance.Contrast(img)
+        brightness_factor = 1.0 + (np.random.rand() - 0.5) * 0.4  # 0.8 to 1.2
+        contrast_factor = 1.0 + (np.random.rand() - 0.5) * 0.2    # 0.9 to 1.1
+        img = enhancer_brightness.enhance(brightness_factor)
+        img = enhancer_contrast.enhance(contrast_factor)
+        return img
 
 class AddRandomRotation:
     def __init__(self, max_angle=30):
@@ -87,16 +79,7 @@ class AddRandomRotation:
         angle = np.random.uniform(-self.max_angle, self.max_angle)
         return img.rotate(angle)
 
-class ElasticDeformation: #TODO: This is not currently used, look into if this actually offers improvement
-    def __init__(self, num_control_points=4, max_displacement=5):
-        self.transform = tio.ElasticDeformation(
-            num_control_points=num_control_points, max_displacement=max_displacement
-        )
-
-    def __call__(self, img):
-        return self.transform(img)
-    
-class RandomSharpness: #TODO: Not currently used, this might help with picking up on patterns, look into using it
+class RandomSharpness:
     def __init__(self, factor_range=(0.5, 2.0)):
         self.factor_range = factor_range
 
@@ -104,23 +87,15 @@ class RandomSharpness: #TODO: Not currently used, this might help with picking u
         factor = np.random.uniform(*self.factor_range)
         enhancer = ImageEnhance.Sharpness(img)
         return enhancer.enhance(factor)
-    
-class RandomErasing: #TODO: Not currently used, I think this might help with having AI pick up on broader patterns/trends if that becomes an issue later
+
+class RandomErasing:
     def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)):
         self.transform = transforms.RandomErasing(p=p, scale=scale, ratio=ratio)
 
     def __call__(self, img):
         return self.transform(img)
 
-# Preprocessing for clinical and biomarker data
-def preprocess_biomarkers(data_frame, biomarker_cols):
-    for col in biomarker_cols:
-        if col in data_frame:
-            data_frame[col] = data_frame[col].fillna(data_frame[col].mean())  # Impute missing values
-            data_frame[col] = (data_frame[col] - data_frame[col].mean()) / data_frame[col].std()  # Normalize
-    return data_frame
-
-
+# Dataset Class
 class MultiTransformOLIVESDataset(Dataset):
     def __init__(self, csv_path, image_root, biomarker_cols, transforms_list, num_transforms=1, image_mode="RGB"):
         self.data = pd.read_csv(csv_path)
@@ -154,7 +129,6 @@ class MultiTransformOLIVESDataset(Dataset):
 
         return image, biomarker_tensor, label_tensor
 
-
 def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
     """
     Returns train and validation DataLoaders with default settings.
@@ -168,64 +142,73 @@ def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
         tuple: (train_loader, val_loader)
     """
 
-    # Define multiple transformation pipelines
-    transform_0 = transforms.Compose([ #TODO: Not used yet
-        transforms.Resize((224, 224)),
-        ElasticDeformation(num_control_points=5, max_displacement=5),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_sharpness = transforms.Compose([ #TODO: Not used yet
+    # Transformation pipelines
+    transform_sharpness = transforms.Compose([
         transforms.Resize((224, 224)),
         RandomSharpness(factor_range=(0.5, 2.0)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
     ])
 
-    transform_random_erase = transforms.Compose([ #TODO: Not used yet
+    transform_random_erase = transforms.Compose([
         transforms.Resize((224, 224)),
-        RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+        RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
     ])
 
     transform_1 = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
     ])
 
     transform_2 = transforms.Compose([
         transforms.Resize((224, 224)),
         AddSaltPepperNoise(amount=0.01),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
     ])
 
     transform_3 = transforms.Compose([
         transforms.Resize((224, 224)),
         AddGaussianNoise(mean=0, variance=0.01),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
     ])
 
     transform_4 = transforms.Compose([
         transforms.Resize((224, 224)),
         AddRandomBrightnessContrast(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
     ])
 
     transform_5 = transforms.Compose([
         transforms.Resize((224, 224)),
         AddRandomRotation(max_angle=30),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
     ])
 
-    transforms_list = [transform_1, transform_2, transform_3, transform_4, transform_5]
+    transforms_list = [
+        transform_sharpness,
+        transform_random_erase,
+        transform_1,
+        transform_2,
+        transform_3,
+        transform_4,
+        transform_5,
+    ]
+
     dataset = MultiTransformOLIVESDataset(
         csv_path=LABEL_DATA_PATH,
         image_root=DATA_PATH,
@@ -238,7 +221,9 @@ def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=pin_memory)
 
     return train_loader, val_loader
