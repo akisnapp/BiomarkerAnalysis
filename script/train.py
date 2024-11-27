@@ -68,4 +68,4 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
         scheduler.step(val_loss)
 
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        
+
