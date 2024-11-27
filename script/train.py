@@ -20,6 +20,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
     """
     # Learning rate scheduler
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+    
+    train_losses = []
+    val_losses = []
+    train_accuracies = [] #TODO
+    val_accuracies = [] #TODO
 
     for epoch in range(epochs):
         # Training phase
@@ -66,6 +71,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
 
         # Adjust learning rate
         scheduler.step(val_loss)
+        
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
 
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+    
+    return train_losses, val_losses
+
+
+
+
 
