@@ -202,7 +202,7 @@ def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
     transforms_list = [
         transform_sharpness,
         transform_random_erase,
-        transform_1,
+        #transform_1,
         transform_2,
         transform_3,
         transform_4,
