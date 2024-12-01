@@ -22,7 +22,10 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, device, 
         val_losses (list): List of validation losses per epoch.
     """
     # Learning rate scheduler
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+    
+    current_lr = scheduler.get_last_lr()
+    print("Current learning rate:", current_lr)
     
     train_losses = []
     val_losses = []
