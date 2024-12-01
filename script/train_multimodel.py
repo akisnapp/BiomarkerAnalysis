@@ -62,12 +62,12 @@ model = MultimodalTransformer(
 # Define the criterion and optimizer
 criterion = nn.MSELoss()  # Use MSELoss for regression tasks
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
-train_loader, val_loader = get_data_loaders()
+train_loader, test_loader, val_loader = get_data_loaders()
 # Train the model
-train_losses, val_losses = train_model(
+train_losses, test_losses = train_model(
     model=model,
     train_loader=train_loader,
-    val_loader=val_loader,
+    test_loader=test_loader,
     criterion=criterion,
     optimizer=optimizer,
     device=DEVICE,
@@ -83,7 +83,7 @@ plt.figure(figsize=(12, 5))
 
 plt.subplot(1, 2, 1)
 plt.plot(epochs[1:], train_losses[1:], label="Training Loss", color="blue")
-plt.plot(epochs[1:], val_losses[1:], label="Validation Loss", color="red")
+plt.plot(epochs[1:], test_losses[1:], label="Test Loss", color="red")
 plt.title("Loss over Epochs")
 plt.xlabel("Epochs")
 plt.ylabel("Loss")
