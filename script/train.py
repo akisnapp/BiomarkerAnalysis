@@ -3,14 +3,14 @@ import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import os
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, device, epochs=10, save_path='best_model.pth'):
+def train_model(model, train_loader, test_loader, criterion, optimizer, device, epochs=10, save_path='best_model.pth'):
     """
     Train and validate the model for the specified number of epochs.
 
     Args:
         model (torch.nn.Module): The model to train.
         train_loader (DataLoader): DataLoader for training data.
-        val_loader (DataLoader): DataLoader for validation data.
+        test_loader (DataLoader): DataLoader for validation data.
         criterion (torch.nn.Module): Loss function.
         optimizer (torch.optim.Optimizer): Optimizer for model parameters.
         device (torch.device): Device to run the training on (CPU or GPU).
@@ -62,7 +62,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for images, biomarkers, labels in val_loader:
+            for images, biomarkers, labels in test_loader:
                 # Move data to the correct device
                 images = images.to(device)
                 biomarkers = biomarkers.to(device)
@@ -73,7 +73,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
                 loss = criterion(outputs, labels)
                 val_loss += loss.item() * images.size(0)
 
-        val_loss /= len(val_loader.dataset)
+        val_loss /= len(test_loader.dataset)
         val_losses.append(val_loss)
 
         # Adjust learning rate
@@ -83,8 +83,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, e
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), save_path)
-            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} - **Best Model Saved!**")
+            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Test Loss: {val_loss:.4f} - **Best Model Saved!**")
         else:
-            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Test Loss: {val_loss:.4f}")
         
     return train_losses, val_losses
