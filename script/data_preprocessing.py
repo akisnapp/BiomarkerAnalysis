@@ -7,6 +7,7 @@ import torch
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 import cv2
+from scipy.ndimage import gaussian_filter, map_coordinates
 
 # Constants for default configuration
 DATA_PATH = '/storage/ice1/shared/d-pace_community/makerspace-datasets/MEDICAL/OLIVES/OLIVES/'
@@ -88,12 +89,78 @@ class RandomSharpness:
         enhancer = ImageEnhance.Sharpness(img)
         return enhancer.enhance(factor)
 
+# +
 class RandomErasing:
     def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)):
         self.transform = transforms.RandomErasing(p=p, scale=scale, ratio=ratio)
 
     def __call__(self, img):
         return self.transform(img)
+
+class ElasticDeformation:
+    def __init__(self, alpha=1.0, sigma=10.0, p=0.5):
+        """
+        Elastic Deformation Transformation.
+
+        Parameters:
+        - alpha: Scaling factor for displacement fields (controls strength of deformation).
+        - sigma: Standard deviation for Gaussian filter (controls smoothness of deformation).
+        - p: Probability of applying the elastic deformation.
+        """
+        self.alpha = alpha
+        self.sigma = sigma
+        self.p = p
+
+    def __call__(self, img):
+        """
+        Apply elastic deformation to the image.
+
+        Parameters:
+        - img: PIL image to which elastic deformation is applied.
+
+        Returns:
+        - Deformed image (PIL).
+        """
+        if np.random.rand() > self.p:
+            return img  # No deformation applied
+
+        img_np = np.array(img)
+        shape = img_np.shape
+
+        # Create random displacement fields
+        random_state = np.random.RandomState(None)
+        dx = gaussian_filter((random_state.rand(*shape[:2]) * 2 - 1), self.sigma, mode="constant", cval=0) * self.alpha
+        dy = gaussian_filter((random_state.rand(*shape[:2]) * 2 - 1), self.sigma, mode="constant", cval=0) * self.alpha
+
+        # Meshgrid to calculate pixel shift
+        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+        distored_x = np.clip(x + dx, 0, shape[1] - 1)
+        distored_y = np.clip(y + dy, 0, shape[0] - 1)
+
+        # Interpolation to create deformed image for each channel (RGB)
+        distorted_img = np.zeros_like(img_np)
+        for i in range(shape[2]):  # For RGB channels (i=0, 1, 2)
+            distorted_img[..., i] = self._map_coordinates(img_np[..., i], distored_y, distored_x)
+
+        return Image.fromarray(distorted_img)
+
+    def _map_coordinates(self, img_channel, distored_y, distored_x):
+        """
+        Perform bilinear interpolation of the image with the displacement fields.
+
+        Parameters:
+        - img_channel: Single channel of the image.
+        - distored_y: Displaced y-coordinates.
+        - distored_x: Displaced x-coordinates.
+
+        Returns:
+        - Interpolated image channel.
+        """
+        # Use scipy's map_coordinates for 2D interpolation
+        return map_coordinates(img_channel, [distored_y, distored_x], order=1, mode='reflect')
+
+
+# -
 
 # Dataset Class
 class MultiTransformOLIVESDataset(Dataset):
@@ -158,6 +225,14 @@ def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
                              std=[0.229, 0.224, 0.225]),
         RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
     ])
+    
+    transform_elastic_deformation = transforms.Compose([
+        transforms.Resize((224, 224)),
+        ElasticDeformation(alpha=1.0, sigma=10.0, p=0.5),  # Elastic Deformation transformation
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
 
     transform_1 = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -200,13 +275,14 @@ def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
     ])
 
     transforms_list = [
+        transform_elastic_deformation,
         transform_sharpness,
         transform_random_erase,
         #transform_1,
         transform_2,
         transform_3,
         transform_4,
-        transform_5,
+        #transform_5,
     ]
 
     dataset = MultiTransformOLIVESDataset(
