@@ -2,31 +2,46 @@ import os
 import pandas as pd
 import numpy as np
 from PIL import Image, ImageEnhance
-import torch.nn.functional as F
 import torch
+from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader
-import cv2
 from scipy.ndimage import gaussian_filter, map_coordinates
 
-# Constants for default configuration
-DATA_PATH = '/storage/ice1/shared/d-pace_community/makerspace-datasets/MEDICAL/OLIVES/OLIVES/'
-LABEL_DATA_PATH = os.path.join(DATA_PATH, 'Biomarker_Clinical_Data_Images_Updated.csv')
-BIOMARKER_COLUMNS = [
+# Constants
+# !pip install zenodo-get
+DATA_PATH ='/storage/ice1/shared/d-pace_community/makerspace-datasets/MEDICAL/OLIVES/OLIVES'
+LABEL_DATA_PATH = 'OLIVES_Dataset_Labels/full_labels/Biomarker_Clinical_Data_Images.csv'
+
+# Define Biomarker Columns (Binary Labels)
+BIOMARKER_COLUMNS_BINARY = [
     'Atrophy / thinning of retinal layers', 'Disruption of EZ', 'DRIL', 'IR hemorrhages',
     'IR HRF', 'Partially attached vitreous face', 'Fully attached vitreous face',
     'Preretinal tissue/hemorrhage', 'DRT/ME', 'Fluid (IRF)', 'Fluid (SRF)',
     'Disruption of RPE', 'PED (serous)', 'SHRM'
 ]
 
-def preprocess_biomarkers(data_frame, biomarker_cols):
-    for col in biomarker_cols:
+# Define Continuous Labels (e.g., Clinical Measurements)
+CONTINUOUS_COLUMNS = [
+    'BCVA',  # Best Corrected Visual Acuity
+    'CST'    # Central Subfield Thickness
+]
+# Preprocessing Function
+def preprocess_data(data_frame, binary_cols=BIOMARKER_COLUMNS_BINARY, continuous_cols=CONTINUOUS_COLUMNS):
+    # Preprocess binary columns
+    for col in binary_cols:
+        if col in data_frame:
+            data_frame[col] = data_frame[col].fillna(0)
+            data_frame[col] = (data_frame[col] > 0).astype(int)  # Ensure binary labels
+
+    # Preprocess continuous columns
+    for col in continuous_cols:
         if col in data_frame:
             data_frame[col] = data_frame[col].fillna(data_frame[col].mean())  # Impute missing values
             data_frame[col] = (data_frame[col] - data_frame[col].mean()) / data_frame[col].std()  # Normalize
+
     return data_frame
 
-# Custom noise addition transformations
+# Custom Transformations
 class AddSaltPepperNoise:
     def __init__(self, amount=0.01):
         self.amount = amount
@@ -60,7 +75,6 @@ class AddGaussianNoise:
         noisy_img = np.clip(noisy_img, 0, 1) * 255
         return Image.fromarray(noisy_img.astype(np.uint8).astype(np.uint8))
 
-# Define more transformations
 class AddRandomBrightnessContrast:
     def __call__(self, img):
         img = img.convert("RGB")
@@ -89,7 +103,6 @@ class RandomSharpness:
         enhancer = ImageEnhance.Sharpness(img)
         return enhancer.enhance(factor)
 
-# +
 class RandomErasing:
     def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)):
         self.transform = transforms.RandomErasing(p=p, scale=scale, ratio=ratio)
@@ -99,216 +112,93 @@ class RandomErasing:
 
 class ElasticDeformation:
     def __init__(self, alpha=1.0, sigma=10.0, p=0.5):
-        """
-        Elastic Deformation Transformation.
-
-        Parameters:
-        - alpha: Scaling factor for displacement fields (controls strength of deformation).
-        - sigma: Standard deviation for Gaussian filter (controls smoothness of deformation).
-        - p: Probability of applying the elastic deformation.
-        """
         self.alpha = alpha
         self.sigma = sigma
         self.p = p
 
     def __call__(self, img):
-        """
-        Apply elastic deformation to the image.
-
-        Parameters:
-        - img: PIL image to which elastic deformation is applied.
-
-        Returns:
-        - Deformed image (PIL).
-        """
         if np.random.rand() > self.p:
-            return img  # No deformation applied
+            return img
 
         img_np = np.array(img)
         shape = img_np.shape
 
-        # Create random displacement fields
         random_state = np.random.RandomState(None)
         dx = gaussian_filter((random_state.rand(*shape[:2]) * 2 - 1), self.sigma, mode="constant", cval=0) * self.alpha
         dy = gaussian_filter((random_state.rand(*shape[:2]) * 2 - 1), self.sigma, mode="constant", cval=0) * self.alpha
 
-        # Meshgrid to calculate pixel shift
         x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
         distored_x = np.clip(x + dx, 0, shape[1] - 1)
         distored_y = np.clip(y + dy, 0, shape[0] - 1)
 
-        # Interpolation to create deformed image for each channel (RGB)
         distorted_img = np.zeros_like(img_np)
-        for i in range(shape[2]):  # For RGB channels (i=0, 1, 2)
-            distorted_img[..., i] = self._map_coordinates(img_np[..., i], distored_y, distored_x)
+        for i in range(shape[2]):  # For RGB channels
+            distorted_img[..., i] = map_coordinates(img_np[..., i], [distored_y, distored_x], order=1, mode='reflect')
 
         return Image.fromarray(distorted_img)
 
-    def _map_coordinates(self, img_channel, distored_y, distored_x):
-        """
-        Perform bilinear interpolation of the image with the displacement fields.
-
-        Parameters:
-        - img_channel: Single channel of the image.
-        - distored_y: Displaced y-coordinates.
-        - distored_x: Displaced x-coordinates.
-
-        Returns:
-        - Interpolated image channel.
-        """
-        # Use scipy's map_coordinates for 2D interpolation
-        return map_coordinates(img_channel, [distored_y, distored_x], order=1, mode='reflect')
-
-
-# -
-
 # Dataset Class
-class MultiTransformOLIVESDataset(Dataset):
-    def __init__(self, csv_path, image_root, biomarker_cols, transforms_list, num_transforms=1, image_mode="RGB"):
+class MultiLabelOLIVESDataset(Dataset):
+    def __init__(self, csv_path, image_root, binary_cols, continuous_cols, transform=None, image_mode="RGB"):
         self.data = pd.read_csv(csv_path)
         self.image_root = image_root
-        self.biomarker_cols = biomarker_cols
-        self.transforms_list = transforms_list
-        self.num_transforms = num_transforms
-        self.image_mode = image_mode  # "RGB" for 3 channels, "L" for grayscale
-        self.data = preprocess_biomarkers(self.data, biomarker_cols)
-
+        self.binary_cols = binary_cols
+        self.continuous_cols = continuous_cols
+        self.transform = transform
+        self.image_mode = image_mode
+        self.data = preprocess_data(self.data, binary_cols, continuous_cols)
     def __len__(self):
-        return len(self.data) * self.num_transforms
+        return len(self.data)
 
     def __getitem__(self, idx):
-        data_idx = idx // self.num_transforms
-        transform_idx = idx % self.num_transforms
+        row = self.data.iloc[idx]
 
-        image_path = os.path.join(self.image_root, self.data.iloc[data_idx]['Path (Trial/Arm/Folder/Visit/Eye/Image Name)'].strip())
+        image_path = self.image_root + self.data.iloc[idx]['Path (Trial/Arm/Folder/Visit/Eye/Image Name)']
+        image_path = image_path.replace(" ", "_")
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
-
         image = Image.open(image_path).convert(self.image_mode)
-        transform = self.transforms_list[transform_idx]
-        if transform:
-            image = transform(image)
+        if self.transform:
+            image = self.transform(image)
 
-        biomarker_data = self.data.iloc[data_idx][self.biomarker_cols].values.astype(np.float32)
-        label = self.data.iloc[data_idx]['BCVA']
-        biomarker_tensor = torch.tensor(biomarker_data, dtype=torch.float32)
-        label_tensor = torch.tensor(label, dtype=torch.float32)
+        # Get binary labels
+        binary_labels = row[self.binary_cols].values.astype(np.float32)
+        binary_labels = torch.tensor(binary_labels, dtype=torch.float32)
 
-        return image, biomarker_tensor, label_tensor
+        # Get continuous labels
+        continuous_labels = row[self.continuous_cols].values.astype(np.float32)
+        continuous_labels = torch.tensor(continuous_labels, dtype=torch.float32)
 
-def get_data_loaders(batch_size=16, num_workers=1, pin_memory=True):
-    """
-    Returns train and validation DataLoaders with default settings.
+        return image, binary_labels, continuous_labels
 
-    Args:
-        batch_size (int): Batch size for the DataLoaders. Default is 16.
-        num_workers (int): Number of workers for data loading. Default is 1.
-        pin_memory (bool): Whether to use pinned memory. Default is True.
-
-    Returns:
-        tuple: (train_loader, val_loader)
-    """
-
-    # Transformation pipelines
-    transform_sharpness = transforms.Compose([
+# Prepare DataLoader
+def prepare_dataset(csv_path, image_root, batch_size, binary_cols, continuous_cols, image_mode="RGB", num_workers=1, pin_memory=True):
+    transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        RandomSharpness(factor_range=(0.5, 2.0)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_random_erase = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-        RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
-    ])
-    
-    transform_elastic_deformation = transforms.Compose([
-        transforms.Resize((224, 224)),
-        ElasticDeformation(alpha=1.0, sigma=10.0, p=0.5),  # Elastic Deformation transformation
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_1 = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_2 = transforms.Compose([
-        transforms.Resize((224, 224)),
+        # Add your custom transformations here
         AddSaltPepperNoise(amount=0.01),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_3 = transforms.Compose([
-        transforms.Resize((224, 224)),
         AddGaussianNoise(mean=0, variance=0.01),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_4 = transforms.Compose([
-        transforms.Resize((224, 224)),
         AddRandomBrightnessContrast(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    transform_5 = transforms.Compose([
-        transforms.Resize((224, 224)),
         AddRandomRotation(max_angle=30),
+        RandomSharpness(factor_range=(0.5, 2.0)),
+        ElasticDeformation(alpha=1.0, sigma=10.0, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
+                             std=[0.229, 0.224, 0.225])
     ])
 
-    transforms_list = [
-        transform_elastic_deformation,
-        transform_sharpness,
-        transform_random_erase,
-        #transform_1,
-        transform_2,
-        transform_3,
-        transform_4,
-        #transform_5,
-    ]
+    dataset = MultiLabelOLIVESDataset(csv_path, image_root, binary_cols, continuous_cols, transform, image_mode)
+    total_size = len(dataset)
+    train_size = int(0.8 * total_size)
+    val_size = int(0.1 * total_size)
+    test_size = total_size - train_size - val_size
 
-    dataset = MultiTransformOLIVESDataset(
-        csv_path=LABEL_DATA_PATH,
-        image_root=DATA_PATH,
-        biomarker_cols=BIOMARKER_COLUMNS,
-        transforms_list=transforms_list,
-        num_transforms=len(transforms_list)
-    )
+    # Split dataset
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
 
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - int(train_size * 0.5)
-    test_size = len(dataset) - train_size - val_size
-    train_dataset, test_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, test_size, val_size])
+    # Create DataLoaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=pin_memory)
-
-    return train_loader, test_loader, val_loader
-
-
-
-
-
-
+    return train_loader, val_loader, test_loader
